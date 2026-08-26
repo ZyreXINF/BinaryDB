@@ -11,18 +11,7 @@ int main(void)
     if (fileptr == NULL) {
         fileptr = fopen("bin.khdb", "w+b");
     }
-
-    BinaryObject obj1 = {
-        .object_name = "Firewall",
-        .object_mask = 0b00001101
-    };
-    BinaryObject obj2 = {
-        .object_name = "HoneyPot",
-        .object_mask = 0b11000001
-    };
-
-    db_add(&obj1, fileptr);
-    db_add(&obj2, fileptr);
+    //TODO Optimize the db with n % of deleted entries
 
     db_list(fileptr);
 
