@@ -5,4 +5,4 @@
 /cmake-build-debug/
 
 /db/*
-!/db/.gitkeep
+/db/.gitkeep
