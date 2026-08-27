@@ -1,5 +1,32 @@
-#include <stdio.h>
 #include "database.h"
+
+int db_create(const char *db_name)
+{
+    if (db_name == NULL) {return -1;}
+
+    FILE *dir = fopen(db_name, "wb");
+    if (dir == NULL) {return -1;}
+
+    DataBase db = {
+        .last_id = 0,
+        .records_amount = 0,
+        .deleted_records = 0
+    };
+    if (!fwrite(&db, sizeof(DataBase), 1, dir))
+    {
+        fclose(dir);
+        return -1;
+    }
+    fclose(dir);
+
+    return 1;
+} //TODO Handle existing db
+FILE *db_open(const char *db_name) {return db_name == NULL ? NULL : fopen(db_name, "rb+");}
+int db_close(FILE *dir) {return dir == NULL ? -1 : (!fclose(dir) ? 1 : -1);} //TODO EOF error handling
+int db_optimize(FILE *dir)
+{
+    return 1;
+} //TODO Optimize Database via rewriting based on n% of deleted entries
 
 int db_add(BinaryObject *object, FILE *dir)
 {
@@ -10,10 +37,10 @@ int db_add(BinaryObject *object, FILE *dir)
     fseek(dir, 0, SEEK_END);
     long size = ftell(dir);
 
-    //TODO File corruption check (not possible amount of bytes written)
+    // TODO Change to File corruption check (not possible amount of bytes written), former if can be taken down (create() writes header instead)
     if (size == 0)
     {
-        db.next_id = 0;
+        db.last_id = 0;
         db.records_amount = 1;
         db.deleted_records = 0;
         fseek(dir, 0, SEEK_SET);
@@ -22,13 +49,13 @@ int db_add(BinaryObject *object, FILE *dir)
     {
         fseek(dir, 0, SEEK_SET);
         fread(&db, sizeof(DataBase), 1, dir);
-        db.next_id++;
+        db.last_id++;
         db.records_amount++;
         fseek(dir, 0, SEEK_SET);
     }
     fwrite(&db, sizeof(DataBase), 1, dir);
 
-    object->id = db.next_id;
+    object->id = db.last_id;
     object->deleted = 0;
     fseek(dir, 0, SEEK_END);
     fwrite(object, sizeof(BinaryObject), 1, dir);
@@ -36,7 +63,6 @@ int db_add(BinaryObject *object, FILE *dir)
 
     return 1;
 }
-
 int db_get( BinaryObject *object, unsigned int id, FILE *dir)
 {
     if (dir == NULL || object == NULL) {return -1;}
@@ -53,22 +79,13 @@ int db_get( BinaryObject *object, unsigned int id, FILE *dir)
     }
     return 0;
 }
-
-int db_update(BinaryObject *object, unsigned int id)
-{
-    return 1;
-    //TODO Update function
-}
-
-int db_delete(FILE *dir, BinaryObject *object, unsigned int id)
+int db_update(FILE *dir, BinaryObject *object, unsigned int id)
 {
     if (dir == NULL || object == NULL) {return -1;}
-
     BinaryObject temp_obj;
     bool found = false;
 
     fseek(dir, sizeof(DataBase), SEEK_SET);
-    //Check if id is correct
     while (fread(&temp_obj, sizeof(BinaryObject), 1, dir))
     {
         if (temp_obj.id == id && !temp_obj.deleted)
@@ -77,7 +94,33 @@ int db_delete(FILE *dir, BinaryObject *object, unsigned int id)
             break;
         }
     }
-    if (!found) {return -1;}
+    if (!found) {return 0;}
+
+    object->id = temp_obj.id;
+    object->deleted = 0;
+    fseek(dir, -(long)sizeof(BinaryObject), SEEK_CUR);
+    fwrite(object, sizeof(BinaryObject), 1, dir);
+
+    fflush(dir);
+    return 1;
+}
+int db_delete(FILE *dir, BinaryObject *object, unsigned int id)
+{
+    if (dir == NULL || object == NULL) {return -1;}
+
+    BinaryObject temp_obj;
+    bool found = false;
+
+    fseek(dir, sizeof(DataBase), SEEK_SET);
+    while (fread(&temp_obj, sizeof(BinaryObject), 1, dir))
+    {
+        if (temp_obj.id == id && !temp_obj.deleted)
+        {
+            found = true;
+            break;
+        }
+    }
+    if (!found) {return 0;}
 
     *object = temp_obj;
     fseek(dir, -(long)sizeof(BinaryObject), SEEK_CUR);
@@ -103,7 +146,7 @@ static void print_bits(unsigned char byte)
         printf("%d", (byte >> i) & 1);
     }
 }
-
+//TODO Redesign (no cli)
 void db_list(FILE *dir)
 {
     if (dir == NULL) {return;}
