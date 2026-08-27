@@ -17,6 +17,7 @@ typedef struct
     unsigned char deleted;
 } BinaryObject;
 
+int db_resolve_path(const char *name, char *out, size_t out_size);
 int db_create(const char *db_name);
 FILE *db_open(const char *db_name);
 int db_close(FILE *dir);
@@ -27,6 +28,6 @@ int db_get(BinaryObject *object, unsigned int id, FILE *dir);
 int db_update(FILE *dir, BinaryObject *object, unsigned int id);
 int db_delete(FILE *dir, BinaryObject *object, unsigned int id);
 
-void db_list(FILE *dir);
+int db_list(FILE *dir, BinaryObject **objects, unsigned int *count);
 
 #endif

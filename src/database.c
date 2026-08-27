@@ -1,10 +1,91 @@
+#include <ctype.h>
+#include <stdbool.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/stat.h>
+#ifdef _WIN32
+#include <windows.h>
+#include <direct.h>
+#else
+#include <unistd.h>
+#endif
 #include "database.h"
+
+#define DB_FOLDER "db"
+#define DB_EXTENSION ".khdb"
+
+static int get_executable_dir(char *out, size_t out_size)
+{
+#ifdef _WIN32
+    DWORD len = GetModuleFileNameA(NULL, out, (DWORD)out_size);
+    if (len == 0 || len == out_size) {return -1;}
+#else
+    ssize_t len = readlink("/proc/self/exe", out, out_size - 1);
+    if (len == -1) {return -1;}
+    out[len] = '\0';
+#endif
+
+    char *slash = strrchr(out, '/');
+    char *bslash = strrchr(out, '\\');
+    if (bslash != NULL && (slash == NULL || bslash > slash)) {slash = bslash;}
+    if (slash != NULL) {*slash = '\0';}
+
+    return 0;
+}
+
+static int is_valid_db_name(const char *name)
+{
+    if (name == NULL) {return 0;}
+
+    size_t len = strlen(name);
+    if (len == 0 || len > 50) {return 0;}
+
+    for (size_t i = 0; i < len; i++)
+    {
+        unsigned char c = (unsigned char)name[i];
+        if (!isalnum(c) && c != '_' && c != '-') {return 0;}
+    }
+
+    return 1;
+}
+int db_resolve_path(const char *name, char *out, size_t out_size)
+{
+    if (name == NULL || out == NULL) {return -1;}
+    if (!is_valid_db_name(name)) {return -3;} /* rejects slashes, "..", dots, etc. */
+
+    char exe_dir[512];
+    if (get_executable_dir(exe_dir, sizeof(exe_dir)) != 0) {return -1;}
+
+    char folder[560];
+    snprintf(folder, sizeof(folder), "%s/%s", exe_dir, DB_FOLDER);
+
+#ifdef _WIN32
+    _mkdir(folder);
+#else
+    mkdir(folder, 0755);
+#endif
+
+    snprintf(out, out_size, "%s/%s%s", folder, name, DB_EXTENSION);
+
+    return 0;
+}
 
 int db_create(const char *db_name)
 {
     if (db_name == NULL) {return -1;}
 
-    FILE *dir = fopen(db_name, "wb");
+    char path[600];
+    int resolve_result = db_resolve_path(db_name, path, sizeof(path));
+    if (resolve_result != 0) {return resolve_result;}
+
+    FILE *existing = fopen(path, "rb");
+    if (existing != NULL)
+    {
+        fclose(existing);
+        return -2; /* file already exists, refuse to overwrite */
+    }
+
+    FILE *dir = fopen(path, "wb");
     if (dir == NULL) {return -1;}
 
     DataBase db = {
@@ -20,8 +101,16 @@ int db_create(const char *db_name)
     fclose(dir);
 
     return 1;
-} //TODO Handle existing db
-FILE *db_open(const char *db_name) {return db_name == NULL ? NULL : fopen(db_name, "rb+");}
+}
+FILE *db_open(const char *db_name)
+{
+    if (db_name == NULL) {return NULL;}
+
+    char path[600];
+    if (db_resolve_path(db_name, path, sizeof(path)) != 0) {return NULL;}
+
+    return fopen(path, "rb+");
+}
 int db_close(FILE *dir) {return dir == NULL ? -1 : (!fclose(dir) ? 1 : -1);} //TODO EOF error handling
 int db_optimize(FILE *dir)
 {
@@ -34,25 +123,13 @@ int db_add(BinaryObject *object, FILE *dir)
 
     DataBase db;
 
-    fseek(dir, 0, SEEK_END);
-    long size = ftell(dir);
+    fseek(dir, 0, SEEK_SET);
+    if (fread(&db, sizeof(DataBase), 1, dir) != 1) {return -1;}
 
-    // TODO Change to File corruption check (not possible amount of bytes written), former if can be taken down (create() writes header instead)
-    if (size == 0)
-    {
-        db.last_id = 0;
-        db.records_amount = 1;
-        db.deleted_records = 0;
-        fseek(dir, 0, SEEK_SET);
-    }
-    else
-    {
-        fseek(dir, 0, SEEK_SET);
-        fread(&db, sizeof(DataBase), 1, dir);
-        db.last_id++;
-        db.records_amount++;
-        fseek(dir, 0, SEEK_SET);
-    }
+    db.last_id++;
+    db.records_amount++;
+
+    fseek(dir, 0, SEEK_SET);
     fwrite(&db, sizeof(DataBase), 1, dir);
 
     object->id = db.last_id;
@@ -139,28 +216,30 @@ int db_delete(FILE *dir, BinaryObject *object, unsigned int id)
     return 1;
 }
 
-static void print_bits(unsigned char byte)
+int db_list(FILE *dir, BinaryObject **objects, unsigned int *count)
 {
-    for (int i = 7; i >= 0; i--)
-    {
-        printf("%d", (byte >> i) & 1);
-    }
-}
-//TODO Redesign (no cli)
-void db_list(FILE *dir)
-{
-    if (dir == NULL) {return;}
+    if (dir == NULL || objects == NULL || count == NULL) {return -1;}
+
     fseek(dir, 0, SEEK_SET);
     DataBase db;
-    fread(&db,sizeof(DataBase),1,dir);
-    printf("Entries: %d\n", db.records_amount);
+    if (fread(&db, sizeof(DataBase), 1, dir) != 1) {return -1;}
 
-    BinaryObject object;
-    while (fread(&object,sizeof(BinaryObject),1, dir) != 0)
+    BinaryObject *arr = NULL;
+    if (db.records_amount > 0)
     {
-        if (object.deleted){continue;}
-        printf("ID: %d; Name: %s; Mask: ", object.id, object.object_name);
-        print_bits(object.object_mask);
-        printf("\n");
+        arr = malloc(sizeof(BinaryObject) * db.records_amount);
+        if (arr == NULL) {return -1;}
     }
+
+    unsigned int found = 0;
+    BinaryObject object;
+    while (found < db.records_amount && fread(&object, sizeof(BinaryObject), 1, dir) == 1)
+    {
+        if (object.deleted) {continue;}
+        arr[found++] = object;
+    }
+
+    *objects = arr;
+    *count = found;
+    return 1;
 }
