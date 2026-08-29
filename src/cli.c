@@ -18,6 +18,7 @@ static void cmd_get(FILE *dir, int argc, char **argv);
 static void cmd_update(FILE *dir, int argc, char **argv);
 static void cmd_delete(FILE *dir, int argc, char **argv);
 static void cmd_list(FILE *dir, int argc, char **argv);
+static void cmd_databases(void);
 static void cmd_help(void);
 static int  require_open_db(FILE *dir);
 static void print_bits(unsigned char byte);
@@ -63,6 +64,10 @@ static int cli_execute(FILE **dir, char *current_db, int argc, char **argv)
     else if (strcmp(argv[0], "list") == 0)
     {
         cmd_list(*dir, argc, argv);
+    }
+    else if (strcmp(argv[0], "databases") == 0)
+    {
+        cmd_databases();
     }
     else if (strcmp(argv[0], "help") == 0)
     {
@@ -348,11 +353,39 @@ static void cmd_list(FILE *dir, int argc, char **argv)
     free(objects);
 }
 
+static void cmd_databases(void)
+{
+    char **names = NULL;
+    unsigned int count = 0;
+
+    if (db_list_databases(&names, &count) != 1)
+    {
+        printf("Failed to list databases\n");
+        return;
+    }
+
+    if (count == 0)
+    {
+        printf("No databases found\n");
+    }
+    else
+    {
+        printf("Available databases:\n");
+        for (unsigned int i = 0; i < count; i++)
+        {
+            printf("  %s\n", names[i]);
+        }
+    }
+
+    db_free_database_list(names, count);
+}
+
 static void cmd_help(void)
 {
     printf("Available commands:\n");
     printf("  create <name>              create a new database and open it (no extension, no slashes/dots)\n");
     printf("  open <name>                open an existing database\n");
+    printf("  databases                  list all databases in the db folder\n");
     printf("  add <name> <mask>          add a record (mask is 8 binary digits, e.g. 01010101)\n");
     printf("  get <id>                   print a record by id\n");
     printf("  update <id> <name> <mask>  overwrite a record by id (mask is 8 binary digits)\n");
