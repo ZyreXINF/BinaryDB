@@ -5,6 +5,7 @@
 
 typedef struct
 {
+    unsigned int magic;
     unsigned int last_id;
     unsigned int records_amount;
     unsigned int deleted_records;
@@ -19,6 +20,7 @@ typedef struct
 
 int db_resolve_path(const char *name, char *out, size_t out_size);
 int db_create(const char *db_name);
+int db_remove(const char *db_name);
 FILE *db_open(const char *db_name);
 int db_close(FILE *dir);
 

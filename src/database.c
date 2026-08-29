@@ -11,33 +11,18 @@
 #include <unistd.h>
 #include <dirent.h>
 #endif
+#include "paths.c"
+#include "logger.c"
 #include "database.h"
 
 #define DB_FOLDER "db"
 #define DB_EXTENSION ".khdb"
 #define DB_OPTIMIZATION_THRESHOLD 0.4
+#define DB_MARK 0x4B484442u
 
 static int db_should_optimize(FILE *dir);
 static int db_optimize(FILE *dir);
-
-static int get_executable_dir(char *out, size_t out_size)
-{
-#ifdef _WIN32
-    DWORD len = GetModuleFileNameA(NULL, out, (DWORD)out_size);
-    if (len == 0 || len == out_size) {return -1;}
-#else
-    ssize_t len = readlink("/proc/self/exe", out, out_size - 1);
-    if (len == -1) {return -1;}
-    out[len] = '\0';
-#endif
-
-    char *slash = strrchr(out, '/');
-    char *bslash = strrchr(out, '\\');
-    if (bslash != NULL && (slash == NULL || bslash > slash)) {slash = bslash;}
-    if (slash != NULL) {*slash = '\0';}
-
-    return 0;
-}
+static int db_validate(FILE *dir);
 
 static int is_valid_db_name(const char *name)
 {
@@ -92,19 +77,49 @@ int db_create(const char *db_name)
     }
 
     FILE *dir = fopen(path, "wb");
-    if (dir == NULL) {return -1;}
+    if (dir == NULL)
+    {
+        log_write(LOG_ERROR, "Failed to create database '%s': could not open file for writing", db_name);
+        return -1;
+    }
 
     DataBase db = {
+        .magic = DB_MARK,
         .last_id = 0,
         .records_amount = 0,
         .deleted_records = 0
     };
     if (!fwrite(&db, sizeof(DataBase), 1, dir))
     {
+        log_write(LOG_ERROR, "Failed to create database '%s': could not write header", db_name);
         fclose(dir);
         return -1;
     }
     fclose(dir);
+
+    log_write(LOG_DATABASE, "Database '%s' created", db_name);
+
+    return 1;
+}
+int db_remove(const char *db_name)
+{
+    if (db_name == NULL) {return -1;}
+
+    char path[600];
+    int resolve_result = db_resolve_path(db_name, path, sizeof(path));
+    if (resolve_result != 0) {return resolve_result;}
+
+    FILE *existing = fopen(path, "rb");
+    if (existing == NULL) {return -2;} /* doesn't exist */
+    fclose(existing);
+
+    if (remove(path) != 0)
+    {
+        log_write(LOG_ERROR, "Failed to delete database '%s': remove() failed", db_name);
+        return -1;
+    }
+
+    log_write(LOG_DATABASE, "Database '%s' deleted", db_name);
 
     return 1;
 }
@@ -118,6 +133,13 @@ FILE *db_open(const char *db_name)
     FILE *dir = fopen(path, "rb+");
     if (dir == NULL) {return NULL;}
 
+    if (db_validate(dir) != 1)
+    {
+        log_write(LOG_ERROR, "Database '%s' failed integrity check on open and was refused", db_name);
+        fclose(dir);
+        return NULL;
+    }
+
     if (db_should_optimize(dir) == 1)
     {
         db_optimize(dir);
@@ -125,7 +147,7 @@ FILE *db_open(const char *db_name)
 
     return dir;
 }
-int db_close(FILE *dir) {return dir == NULL ? -1 : (!fclose(dir) ? 1 : -1);} //TODO EOF error handling
+int db_close(FILE *dir) {return dir == NULL ? -1 : (!fclose(dir) ? 1 : -1);}
 
 static int db_should_optimize(FILE *dir)
 {
@@ -141,13 +163,48 @@ static int db_should_optimize(FILE *dir)
     double deleted_ratio = (double)db.deleted_records / (double)total;
     return deleted_ratio > DB_OPTIMIZATION_THRESHOLD ? 1 : 0;
 }
+static int db_validate(FILE *dir)
+{
+    if (dir == NULL) {return -1;}
+
+    fseek(dir, 0, SEEK_END);
+    long file_size = ftell(dir);
+    if (file_size < (long)sizeof(DataBase)) {return -1;} /* too small to even hold a header */
+
+    DataBase db;
+    fseek(dir, 0, SEEK_SET);
+    if (fread(&db, sizeof(DataBase), 1, dir) != 1) {return -1;}
+
+    if (db.magic != DB_MARK) {return -1;} /* not a KhDB file, or header corrupted */
+
+    long expected_size = (long)sizeof(DataBase) +
+        (long)(db.records_amount + db.deleted_records) * (long)sizeof(BinaryObject);
+    if (file_size != expected_size) {return -1;} /* file was truncated or has extra/missing bytes */
+
+    unsigned int max_id_seen = 0;
+    BinaryObject temp_obj;
+    while (fread(&temp_obj, sizeof(BinaryObject), 1, dir) == 1)
+    {
+        if (temp_obj.deleted != 0 && temp_obj.deleted != 1) {return -1;} /* garbage flag byte */
+        if (temp_obj.id > max_id_seen) {max_id_seen = temp_obj.id;}
+    }
+    if (db.last_id < max_id_seen) {return -1;} /* last_id can't be lower than an id already handed out */
+
+    return 1; /* valid */
+}
 static int db_optimize(FILE *dir)
 {
     if (dir == NULL) {return -1;}
 
     DataBase db;
     fseek(dir, 0, SEEK_SET);
-    if (fread(&db, sizeof(DataBase), 1, dir) != 1) {return -1;}
+    if (fread(&db, sizeof(DataBase), 1, dir) != 1)
+    {
+        log_write(LOG_ERROR, "Optimize failed: could not read database header");
+        return -1;
+    }
+
+    unsigned int deleted_before = db.deleted_records;
 
     long read_pos = (long)sizeof(DataBase);
     long write_pos = (long)sizeof(DataBase);
@@ -179,10 +236,23 @@ static int db_optimize(FILE *dir)
     fflush(dir);
 
 #ifdef _WIN32
-    if (_chsize(_fileno(dir), write_pos) != 0) {return -1;}
+    if (_chsize(_fileno(dir), write_pos) != 0)
+    {
+        log_write(LOG_ERROR, "Optimize failed: could not truncate file after compaction");
+        return -1;
+    }
 #else
-    if (ftruncate(fileno(dir), write_pos) != 0) {return -1;}
+    if (ftruncate(fileno(dir), write_pos) != 0)
+    {
+        log_write(LOG_ERROR, "Optimize failed: could not truncate file after compaction");
+        return -1;
+    }
 #endif
+
+    long bytes_reclaimed = (long)deleted_before * (long)sizeof(BinaryObject);
+    log_write(LOG_DATABASE,
+        "Database optimized: %u deleted record(s) purged, %u live record(s) kept, %ld byte(s) reclaimed",
+        deleted_before, live_count, bytes_reclaimed);
 
     return 1;
 }
@@ -432,7 +502,6 @@ int db_list_databases(char ***names, unsigned int *count)
     *count = found;
     return 1;
 }
-
 void db_free_database_list(char **names, unsigned int count)
 {
     if (names == NULL) {return;}

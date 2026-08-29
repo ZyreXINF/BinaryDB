@@ -13,6 +13,7 @@ static int  cli_execute(FILE **dir, char *current_db, int argc, char **argv);
 
 static void cmd_create(FILE **dir, char *current_db, int argc, char **argv);
 static void cmd_open(FILE **dir, char *current_db, int argc, char **argv);
+static void cmd_dropdb(FILE **dir, char *current_db, int argc, char **argv);
 static void cmd_add(FILE *dir, int argc, char **argv);
 static void cmd_get(FILE *dir, int argc, char **argv);
 static void cmd_update(FILE *dir, int argc, char **argv);
@@ -44,6 +45,10 @@ static int cli_execute(FILE **dir, char *current_db, int argc, char **argv)
     else if (strcmp(argv[0], "open") == 0)
     {
         cmd_open(dir, current_db, argc, argv);
+    }
+    else if (strcmp(argv[0], "dropdb") == 0)
+    {
+        cmd_dropdb(dir, current_db, argc, argv);
     }
     else if (strcmp(argv[0], "add") == 0)
     {
@@ -161,6 +166,42 @@ static void cmd_open(FILE **dir, char *current_db, int argc, char **argv)
     strncpy(current_db, argv[1], 63);
     current_db[63] = '\0';
     printf("Opened database '%s'\n", argv[1]);
+}
+static void cmd_dropdb(FILE **dir, char *current_db, int argc, char **argv)
+{
+    if (argc < 2)
+    {
+        printf("Usage: dropdb <name>\n");
+        return;
+    }
+
+    /* if it's the currently open db, close our handle first -
+       Windows in particular won't let us delete a file that's still open */
+    if (current_db[0] != '\0' && strcmp(current_db, argv[1]) == 0 && *dir != NULL)
+    {
+        db_close(*dir);
+        *dir = NULL;
+        current_db[0] = '\0';
+    }
+
+    int result = db_remove(argv[1]);
+    if (result == -2)
+    {
+        printf("No database named '%s' exists\n", argv[1]);
+        return;
+    }
+    if (result == -3)
+    {
+        printf("Invalid name '%s'\n", argv[1]);
+        return;
+    }
+    if (result != 1)
+    {
+        printf("Failed to delete database '%s'\n", argv[1]);
+        return;
+    }
+
+    printf("Deleted database '%s'\n", argv[1]);
 }
 static void cmd_add(FILE *dir, int argc, char **argv)
 {
@@ -386,6 +427,7 @@ static void cmd_help(void)
     printf("  create <name>              create a new database and open it (no extension, no slashes/dots)\n");
     printf("  open <name>                open an existing database\n");
     printf("  databases                  list all databases in the db folder\n");
+    printf("  dropdb <name>              permanently delete a database file\n");
     printf("  add <name> <mask>          add a record (mask is 8 binary digits, e.g. 01010101)\n");
     printf("  get <id>                   print a record by id\n");
     printf("  update <id> <name> <mask>  overwrite a record by id (mask is 8 binary digits)\n");
